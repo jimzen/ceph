@@ -204,8 +204,14 @@ class LocalRemoteProcess(object):
 
         if self.subproc.poll() is not None:
             out, err = self.subproc.communicate()
-            self.stdout.write(out)
-            self.stderr.write(err)
+            if isinstance(self.stdout, StringIO):
+                self.stdout.write(out.decode(errors='ignore'))
+            else:
+                self.stdout.write(out)
+            if isinstance(self.stderr, StringIO):
+                self.stderr.write(err.decode(errors='ignore'))
+            else:
+                self.stderr.write(err)
             self.exitstatus = self.returncode = self.subproc.returncode
             return True
         else:
@@ -350,8 +356,8 @@ class LocalRemote(object):
         shell = any([a for a in args if isinstance(a, Raw)])
 
         # Filter out helper tools that don't exist in a vstart environment
-        args = [a for a in args if a not in {
-            'adjust-ulimits', 'ceph-coverage'}]
+        args = [a for a in args if a not in ('adjust-ulimits',
+                                             'ceph-coverage')]
 
         # Adjust binary path prefix if given a bare program name
         if "/" not in args[0]:

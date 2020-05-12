@@ -575,7 +575,6 @@ class IscsiServiceSpec(ServiceSpec):
     def __init__(self, service_id, pool=None,
                  placement=None,
                  trusted_ip_list=None,
-                 fqdn_enabled=None,
                  api_port=None,
                  api_user=None,
                  api_password=None,
@@ -591,13 +590,15 @@ class IscsiServiceSpec(ServiceSpec):
         #: RADOS pool where ceph-iscsi config data is stored.
         self.pool = pool
         self.trusted_ip_list = trusted_ip_list
-        self.fqdn_enabled = fqdn_enabled
         self.api_port = api_port
         self.api_user = api_user
         self.api_password = api_password
         self.api_secure = api_secure
         self.ssl_cert = ssl_cert
         self.ssl_key = ssl_key
+
+        if not self.api_secure and self.ssl_cert and self.ssl_key:
+            self.api_secure = True
 
     def validate_add(self):
         servicespec_validate_add(self)

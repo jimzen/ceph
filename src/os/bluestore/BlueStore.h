@@ -1945,6 +1945,8 @@ public:
     uint32_t used = 0;
     uint64_t head_read = 0;
     uint64_t tail_read = 0;
+    BlobRef blob_ref;
+    uint64_t blob_start = 0;
     PExtentVector res_extents;
 
     inline uint64_t blob_aligned_len() const {
@@ -1956,7 +1958,7 @@ public:
       uint64_t block_size,
       uint64_t offset,
       uint64_t l);
-    bool apply_defer(BlueStore::extent_map_t::iterator ep);
+    bool apply_defer();
   };
 
   // --------------------------------------------------------
@@ -3094,7 +3096,6 @@ private:
     TransContext* txc,
     CollectionRef& c,
     OnodeRef o,
-    BlueStore::extent_map_t::iterator ep,
     BigDeferredWriteContext& dctx,
     bufferlist::iterator& blp,
     WriteContext* wctx);
@@ -3616,7 +3617,8 @@ class RocksDBBlueFSVolumeSelector : public BlueFSVolumeSelector
   enum {
     // use 0/nullptr as unset indication
     LEVEL_FIRST = 1,
-    LEVEL_WAL = LEVEL_FIRST,
+    LEVEL_LOG = LEVEL_FIRST, // BlueFS log
+    LEVEL_WAL,
     LEVEL_DB,
     LEVEL_SLOW,
     LEVEL_MAX
@@ -3626,6 +3628,8 @@ class RocksDBBlueFSVolumeSelector : public BlueFSVolumeSelector
   typedef matrix_2d<uint64_t, BlueFS::MAX_BDEV + 1, LEVEL_MAX - LEVEL_FIRST + 1> per_level_per_dev_usage_t;
 
   per_level_per_dev_usage_t per_level_per_dev_usage;
+  // file count per level, add +1 to keep total file count
+  uint64_t per_level_files[LEVEL_MAX - LEVEL_FIRST + 1] = { 0 };
 
   // Note: maximum per-device totals below might be smaller than corresponding
   // perf counters by up to a single alloc unit (1M) due to superblock extent.
@@ -3651,6 +3655,7 @@ public:
     uint64_t reserved,
     bool new_pol)
   {
+    l_totals[LEVEL_LOG - LEVEL_FIRST] = 0; // not used at the moment
     l_totals[LEVEL_WAL - LEVEL_FIRST] = _wal_total;
     l_totals[LEVEL_DB - LEVEL_FIRST] = _db_total;
     l_totals[LEVEL_SLOW - LEVEL_FIRST] = _slow_total;
@@ -3685,9 +3690,8 @@ public:
     }
   }
 
-  void* get_hint_by_device(uint8_t dev) const override {
-    ceph_assert(dev == BlueFS::BDEV_WAL); // others aren't used atm
-    return  reinterpret_cast<void*>(LEVEL_WAL);
+  void* get_hint_for_log() const override {
+    return  reinterpret_cast<void*>(LEVEL_LOG);
   }
   void* get_hint_by_dir(const std::string& dirname) const override;
 
@@ -3721,6 +3725,8 @@ public:
         max = cur;
       }
     }
+    ++per_level_files[pos];
+    ++per_level_files[LEVEL_MAX - LEVEL_FIRST];
   }
   void sub_usage(void* hint, const bluefs_fnode_t& fnode) override {
     if (hint == nullptr)
@@ -3740,6 +3746,10 @@ public:
     auto& cur = per_level_per_dev_usage.at(BlueFS::MAX_BDEV, pos);
     ceph_assert(cur >= fnode.size);
     cur -= fnode.size;
+    ceph_assert(per_level_files[pos] > 0);
+    --per_level_files[pos];
+    ceph_assert(per_level_files[LEVEL_MAX - LEVEL_FIRST] > 0);
+    --per_level_files[LEVEL_MAX - LEVEL_FIRST];
   }
   void add_usage(void* hint, uint64_t fsize) override {
     if (hint == nullptr)

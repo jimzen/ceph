@@ -44,6 +44,7 @@
 #include "perfglue/heap_profiler.h"
 #include "common/blkdev.h"
 #include "common/numa.h"
+#include "common/pretty_binary.h"
 
 #if defined(WITH_LTTNG)
 #define TRACEPOINT_DEFINE
@@ -249,58 +250,6 @@ static int decode_escaped(const char *p, string *out)
      out->append(buff, ptr-buff);
   }
   return p - orig_p;
-}
-
-// some things we encode in binary (as le32 or le64); print the
-// resulting key strings nicely
-template<typename S>
-static string pretty_binary_string(const S& in)
-{
-  char buf[10];
-  string out;
-  out.reserve(in.length() * 3);
-  enum { NONE, HEX, STRING } mode = NONE;
-  unsigned from = 0, i;
-  for (i=0; i < in.length(); ++i) {
-    if ((in[i] < 32 || (unsigned char)in[i] > 126) ||
-	(mode == HEX && in.length() - i >= 4 &&
-	 ((in[i] < 32 || (unsigned char)in[i] > 126) ||
-	  (in[i+1] < 32 || (unsigned char)in[i+1] > 126) ||
-	  (in[i+2] < 32 || (unsigned char)in[i+2] > 126) ||
-	  (in[i+3] < 32 || (unsigned char)in[i+3] > 126)))) {
-      if (mode == STRING) {
-	out.append(in.c_str() + from, i - from);
-	out.push_back('\'');
-      }
-      if (mode != HEX) {
-	out.append("0x");
-	mode = HEX;
-      }
-      if (in.length() - i >= 4) {
-	// print a whole u32 at once
-	snprintf(buf, sizeof(buf), "%08x",
-		 (uint32_t)(((unsigned char)in[i] << 24) |
-			    ((unsigned char)in[i+1] << 16) |
-			    ((unsigned char)in[i+2] << 8) |
-			    ((unsigned char)in[i+3] << 0)));
-	i += 3;
-      } else {
-	snprintf(buf, sizeof(buf), "%02x", (int)(unsigned char)in[i]);
-      }
-      out.append(buf);
-    } else {
-      if (mode != STRING) {
-	out.push_back('\'');
-	mode = STRING;
-	from = i;
-      }
-    }
-  }
-  if (mode == STRING) {
-    out.append(in.c_str() + from, i - from);
-    out.push_back('\'');
-  }
-  return out;
 }
 
 template<typename T>
@@ -6138,7 +6087,7 @@ void BlueStore::_fsck_collections(int64_t* errors)
 {
   if (collections_had_errors) {
     dout(10) << __func__ << dendl;
-    KeyValueDB::Iterator it = db->get_iterator(PREFIX_COLL);
+    KeyValueDB::Iterator it = db->get_iterator(PREFIX_COLL, KeyValueDB::ITERATOR_NOCACHE);
     for (it->upper_bound(string());
       it->valid();
       it->next()) {
@@ -6187,7 +6136,7 @@ void BlueStore::_open_statfs()
   } else {
     per_pool_stat_collection = true;
     dout(10) << __func__ << " per-pool statfs is enabled" << dendl;
-    KeyValueDB::Iterator it = db->get_iterator(PREFIX_STAT);
+    KeyValueDB::Iterator it = db->get_iterator(PREFIX_STAT, KeyValueDB::ITERATOR_NOCACHE);
     for (it->upper_bound(string());
 	 it->valid();
 	 it->next()) {
@@ -7236,7 +7185,7 @@ void BlueStore::_fsck_check_pool_statfs(
   int64_t& warnings,
   BlueStoreRepairer* repairer)
 {
-  auto it = db->get_iterator(PREFIX_STAT);
+  auto it = db->get_iterator(PREFIX_STAT, KeyValueDB::ITERATOR_NOCACHE);
   if (it) {
     for (it->lower_bound(string()); it->valid(); it->next()) {
       string key = it->key();
@@ -7864,7 +7813,7 @@ void BlueStore::_fsck_check_objects(FSCKDepth depth,
 
   size_t processed_myself = 0;
 
-  auto it = db->get_iterator(PREFIX_OBJ);
+  auto it = db->get_iterator(PREFIX_OBJ, KeyValueDB::ITERATOR_NOCACHE);
   mempool::bluestore_fsck::list<string> expecting_shards;
   if (it) {
     const size_t thread_count = cct->_conf->bluestore_fsck_quick_fix_threads;
@@ -8369,7 +8318,7 @@ int BlueStore::_fsck_on_open(BlueStore::FSCKDepth depth, bool repair)
   }
 
   dout(1) << __func__ << " checking shared_blobs" << dendl;
-  it = db->get_iterator(PREFIX_SHARED_BLOB);
+  it = db->get_iterator(PREFIX_SHARED_BLOB, KeyValueDB::ITERATOR_NOCACHE);
   if (it) {
     // FIXME minor: perhaps simplify for shallow mode?
     // fill global if not overriden below
@@ -8453,7 +8402,7 @@ int BlueStore::_fsck_on_open(BlueStore::FSCKDepth depth, bool repair)
     auto& space_tracker = repairer.get_space_usage_tracker();
     auto& misref_extents = repairer.get_misreferences();
     interval_set<uint64_t> to_release;
-    it = db->get_iterator(PREFIX_OBJ);
+    it = db->get_iterator(PREFIX_OBJ, KeyValueDB::ITERATOR_NOCACHE);
     if (it) {
       // fill global if not overriden below
       auto expected_statfs = &expected_store_statfs;
@@ -8690,7 +8639,7 @@ int BlueStore::_fsck_on_open(BlueStore::FSCKDepth depth, bool repair)
 
   if (depth != FSCK_SHALLOW) {
     dout(1) << __func__ << " checking for stray omap data " << dendl;
-    it = db->get_iterator(PREFIX_OMAP);
+    it = db->get_iterator(PREFIX_OMAP, KeyValueDB::ITERATOR_NOCACHE);
     if (it) {
       uint64_t last_omap_head = 0;
       for (it->lower_bound(string()); it->valid(); it->next()) {
@@ -8706,7 +8655,7 @@ int BlueStore::_fsck_on_open(BlueStore::FSCKDepth depth, bool repair)
         }
       }
     }
-    it = db->get_iterator(PREFIX_PGMETA_OMAP);
+    it = db->get_iterator(PREFIX_PGMETA_OMAP, KeyValueDB::ITERATOR_NOCACHE);
     if (it) {
       uint64_t last_omap_head = 0;
       for (it->lower_bound(string()); it->valid(); it->next()) {
@@ -8722,7 +8671,7 @@ int BlueStore::_fsck_on_open(BlueStore::FSCKDepth depth, bool repair)
         }
       }
     }
-    it = db->get_iterator(PREFIX_PERPOOL_OMAP);
+    it = db->get_iterator(PREFIX_PERPOOL_OMAP, KeyValueDB::ITERATOR_NOCACHE);
     if (it) {
       uint64_t last_omap_head = 0;
       for (it->lower_bound(string()); it->valid(); it->next()) {
@@ -8743,7 +8692,7 @@ int BlueStore::_fsck_on_open(BlueStore::FSCKDepth depth, bool repair)
       }
     }
     dout(1) << __func__ << " checking deferred events" << dendl;
-    it = db->get_iterator(PREFIX_DEFERRED);
+    it = db->get_iterator(PREFIX_DEFERRED, KeyValueDB::ITERATOR_NOCACHE);
     if (it) {
       for (it->lower_bound(string()); it->valid(); it->next()) {
         bufferlist bl = it->value();
@@ -13320,14 +13269,17 @@ bool BlueStore::BigDeferredWriteContext::can_defer(
     res = blob_aligned_len() <= prefer_deferred_size &&
       blob_aligned_len() <= ondisk &&
       blob.is_allocated(b_off, blob_aligned_len());
+    if (res) {
+      blob_ref = ep->blob;
+      blob_start = ep->blob_start();
+    }
   }
   return res;
 }
 
-bool BlueStore::BigDeferredWriteContext::apply_defer(
-    BlueStore::extent_map_t::iterator ep)
+bool BlueStore::BigDeferredWriteContext::apply_defer()
 {
-  int r = ep->blob->get_blob().map(
+  int r = blob_ref->get_blob().map(
     b_off, blob_aligned_len(),
     [&](const bluestore_pextent_t& pext,
       uint64_t offset,
@@ -13348,7 +13300,6 @@ void BlueStore::_do_write_big_apply_deferred(
     TransContext* txc,
     CollectionRef& c,
     OnodeRef o,
-    BlueStore::extent_map_t::iterator ep,
     BlueStore::BigDeferredWriteContext& dctx,
     bufferlist::iterator& blp,
     WriteContext* wctx)
@@ -13386,14 +13337,14 @@ void BlueStore::_do_write_big_apply_deferred(
     bl.claim_append(tail_bl);
     logger->inc(l_bluestore_write_penalty_read_ops);
   }
-  auto b0 = ep->blob;
+  auto& b0 = dctx.blob_ref;
   _buffer_cache_write(txc, b0, dctx.b_off, bl,
     wctx->buffered ? 0 : Buffer::FLAG_NOCACHE);
 
   b0->dirty_blob().calc_csum(dctx.b_off, bl);
 
   Extent* le = o->extent_map.set_lextent(c, dctx.off,
-    dctx.off - ep->blob_start(), dctx.used, b0, &wctx->old_extents);
+    dctx.off - dctx.blob_start, dctx.used, b0, &wctx->old_extents);
 
   // in fact this is a no-op for big writes but left here to maintain
   // uniformity and avoid missing after some refactor.
@@ -13459,7 +13410,6 @@ void BlueStore::_do_write_big(
           false;
         auto offset_next = offset + head_info.used;
         auto remaining = l - head_info.used;
-
         if (will_defer && remaining) {
           will_defer = false;
           if (remaining <= prefer_deferred_size_snapshot) {
@@ -13472,31 +13422,30 @@ void BlueStore::_do_write_big(
                 block_size,
                 offset_next,
                 remaining);
-
             will_defer = will_defer && remaining == tail_info.used;
           }
         }
         if (will_defer) {
-          dout(20) << __func__ << " " << *(ep->blob)
+          dout(20) << __func__ << " " << *(head_info.blob_ref)
             << " deferring big " << std::hex
             << " (0x" << head_info.b_off << "~" << head_info.blob_aligned_len() << ")"
             << std::dec << " write via deferred"
             << dendl;
           if (remaining) {
-            dout(20) << __func__ << " " << *(ep_next->blob)
+            dout(20) << __func__ << " " << *(tail_info.blob_ref)
               << " deferring big " << std::hex
               << " (0x" << tail_info.b_off << "~" << tail_info.blob_aligned_len() << ")"
               << std::dec << " write via deferred"
               << dendl;
           }
 
-          will_defer = head_info.apply_defer(ep);
+          will_defer = head_info.apply_defer();
           if (!will_defer) {
             dout(20) << __func__
               << " deferring big fell back, head isn't continuous"
               << dendl;
           } else if (remaining) {
-            will_defer = tail_info.apply_defer(ep_next);
+            will_defer = tail_info.apply_defer();
             if (!will_defer) {
               dout(20) << __func__
                 << " deferring big fell back, tail isn't continuous"
@@ -13505,9 +13454,9 @@ void BlueStore::_do_write_big(
           }
         }
         if (will_defer) {
-          _do_write_big_apply_deferred(txc, c, o, ep, head_info, blp, wctx);
+          _do_write_big_apply_deferred(txc, c, o, head_info, blp, wctx);
           if (remaining) {
-            _do_write_big_apply_deferred(txc, c, o, ep_next, tail_info,
+            _do_write_big_apply_deferred(txc, c, o, tail_info,
               blp, wctx);
           }
           offset += l;
@@ -16010,6 +15959,7 @@ uint8_t RocksDBBlueFSVolumeSelector::select_prefer_bdev(void* h) {
       // - observed maximums on DB dev for DB/WAL/UNSORTED data
       // - observed maximum spillovers
       uint64_t max_db_use = 0; // max db usage we potentially observed
+      max_db_use += per_level_per_dev_max.at(BlueFS::BDEV_DB, LEVEL_LOG - LEVEL_FIRST);
       max_db_use += per_level_per_dev_max.at(BlueFS::BDEV_DB, LEVEL_WAL - LEVEL_FIRST);
       max_db_use += per_level_per_dev_max.at(BlueFS::BDEV_DB, LEVEL_DB - LEVEL_FIRST);
       // this could go to db hence using it in the estimation
@@ -16026,6 +15976,7 @@ uint8_t RocksDBBlueFSVolumeSelector::select_prefer_bdev(void* h) {
       }
     }
     break;
+  case LEVEL_LOG:
   case LEVEL_WAL:
     res = BlueFS::BDEV_WAL;
     break;
@@ -16068,14 +16019,15 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
     << ", slow_total:" << l_totals[LEVEL_SLOW - LEVEL_FIRST]
     << ", db_avail:" << db_avail4slow << std::endl
     << "Usage matrix:" << std::endl;
-  constexpr std::array<const char*, 7> names{ {
+  constexpr std::array<const char*, 8> names{ {
     "DEV/LEV",
     "WAL",
     "DB",
     "SLOW",
     "*",
     "*",
-    "REAL"
+    "REAL",
+    "FILES",
   } };
   const size_t width = 12;
   for (size_t i = 0; i < names.size(); ++i) {
@@ -16088,6 +16040,8 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
     sout.setf(std::ios::left, std::ios::adjustfield);
     sout.width(width);
     switch (l + LEVEL_FIRST) {
+    case LEVEL_LOG:
+      sout << "LOG"; break;
     case LEVEL_WAL:
       sout << "WAL"; break;
     case LEVEL_DB:
@@ -16097,15 +16051,14 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
     case LEVEL_MAX:
       sout << "TOTALS"; break;
     }
-    for (size_t d = 0; d < max_x - 1; d++) {
+    for (size_t d = 0; d < max_x; d++) {
       sout.setf(std::ios::left, std::ios::adjustfield);
       sout.width(width);
       sout << stringify(byte_u_t(per_level_per_dev_usage.at(d, l)));
     }
     sout.setf(std::ios::left, std::ios::adjustfield);
     sout.width(width);
-    sout << stringify(byte_u_t(per_level_per_dev_usage.at(max_x - 1, l)))
-         << std::endl;
+    sout << stringify(per_level_files[l]) << std::endl;
   }
   ceph_assert(max_x == per_level_per_dev_max.get_max_x());
   ceph_assert(max_y == per_level_per_dev_max.get_max_y());
@@ -16114,6 +16067,8 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
     sout.setf(std::ios::left, std::ios::adjustfield);
     sout.width(width);
     switch (l + LEVEL_FIRST) {
+    case LEVEL_LOG:
+      sout << "LOG"; break;
     case LEVEL_WAL:
       sout << "WAL"; break;
     case LEVEL_DB:

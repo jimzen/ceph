@@ -207,6 +207,8 @@ int rgw_bucket_parse_bucket_key(CephContext *cct, const string& key,
     auto tenant = name.substr(0, pos);
     bucket->tenant.assign(tenant.begin(), tenant.end());
     name = name.substr(pos + 1);
+  } else {
+    bucket->tenant.clear();
   }
 
   // split name:instance
@@ -1653,6 +1655,7 @@ int RGWBucketAdminOp::info(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState
           formatter->dump_string("bucket", bucket_name);
       }
     }
+    store->ctl()->meta.mgr->list_keys_complete(handle);
 
     formatter->close_section();
   }
@@ -1809,6 +1812,11 @@ static int process_stale_instances(rgw::sal::RGWRadosStore *store, RGWBucketAdmi
   bool truncated;
 
   formatter->open_array_section("keys");
+  auto g = make_scope_guard([&store, &handle, &formatter]() {
+                              store->ctl()->meta.mgr->list_keys_complete(handle);
+                              formatter->close_section(); // keys
+                              formatter->flush(cout);
+                            });
 
   do {
     list<std::string> keys;
@@ -1834,8 +1842,6 @@ static int process_stale_instances(rgw::sal::RGWRadosStore *store, RGWBucketAdmi
     }
   } while (truncated);
 
-  formatter->close_section(); // keys
-  formatter->flush(cout);
   return 0;
 }
 

@@ -3290,11 +3290,11 @@ std::vector<Option> get_global_options() {
     .set_description(""),
 
     Option("osd_class_load_list", Option::TYPE_STR, Option::LEVEL_ADVANCED)
-    .set_default("cephfs hello journal lock log numops " "otp rbd refcount rgw rgw_gc timeindex user version cas cmpomap")
+    .set_default("cephfs hello journal lock log numops " "otp rbd refcount rgw rgw_gc timeindex user version cas cmpomap queue 2pc_queue")
     .set_description(""),
 
     Option("osd_class_default_list", Option::TYPE_STR, Option::LEVEL_ADVANCED)
-    .set_default("cephfs hello journal lock log numops " "otp rbd refcount rgw rgw_gc timeindex user version cas cmpomap")
+    .set_default("cephfs hello journal lock log numops " "otp rbd refcount rgw rgw_gc timeindex user version cas cmpomap queue 2pc_queue")
     .set_description(""),
 
     Option("osd_check_for_log_corruption", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
@@ -4417,11 +4417,11 @@ std::vector<Option> get_global_options() {
     .set_description("Rocksdb options"),
 
     Option("bluestore_rocksdb_cf", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
-    .set_default(true)
+    .set_default(false)
     .set_description("Enable use of rocksdb column families for bluestore metadata"),
 
     Option("bluestore_rocksdb_cfs", Option::TYPE_STR, Option::LEVEL_DEV)
-    .set_default("m(3) O(3,0-13) L")
+    .set_default("m(5) O(7,0-13) L")
     .set_description("Definition of column families and their sharding")
     .set_long_description("Space separated list of elements: column_def [ '=' rocksdb_options ]. "
 			  "column_def := column_name [ '(' shard_count [ ',' hash_begin '-' [ hash_end ] ] ')' ]. "
@@ -5168,6 +5168,20 @@ std::vector<Option> get_global_options() {
     .set_default(CEPH_DATADIR "/mgr")
     .add_service("mgr")
     .set_description("Filesystem path to manager modules."),
+
+    Option("mgr_disabled_modules", Option::TYPE_STR, Option::LEVEL_ADVANCED)
+#ifdef MGR_DISABLED_MODULES
+    .set_default(MGR_DISABLED_MODULES)
+#endif
+    .set_flag(Option::FLAG_STARTUP)
+    .add_service("mgr")
+    .set_description("List of manager modules never get loaded")
+    .set_long_description("A comma delimited list of module names. This list "
+        "is read by manager when it starts. By default, manager loads all "
+        "modules found in specified 'mgr_module_path', and it starts the "
+        "enabled ones as instructed. The modules in this list will not be "
+        "loaded at all.")
+    .add_see_also("mgr_module_path"),
 
     Option("mgr_initial_modules", Option::TYPE_STR, Option::LEVEL_BASIC)
     .set_default("restful iostat")
@@ -7464,6 +7478,11 @@ static std::vector<Option> get_rbd_options() {
     Option("rbd_rwl_path", Option::TYPE_STR, Option::LEVEL_ADVANCED)
     .set_default("/tmp")
     .set_description("location of the persistent write back cache in a DAX-enabled filesystem on persistent memory"),
+
+    Option("rbd_quiesce_notification_attempts", Option::TYPE_UINT, Option::LEVEL_DEV)
+    .set_default(10)
+    .set_min(1)
+    .set_description("the number of quiesce notification attempts"),
   });
 }
 

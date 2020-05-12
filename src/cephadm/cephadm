@@ -1080,6 +1080,36 @@ def infer_fsid(func):
 
     return _infer_fsid
 
+def infer_config(func):
+    """
+    If we find a MON daemon, use the config from that container
+    """
+    @wraps(func)
+    def _infer_config():
+        if args.config:
+            logger.debug('Using specified config: %s' % args.config)
+            return func()
+        config = None
+        if args.fsid:
+            name = args.name
+            if not name:
+                daemon_list = list_daemons(detail=False)
+                for daemon in daemon_list:
+                    if daemon['name'].startswith('mon.'):
+                        name = daemon['name']
+                        break
+            if name:
+                config = '/var/lib/ceph/{}/{}/config'.format(args.fsid, name)
+        if config:
+            logger.info('Inferring config %s' % config)
+            args.config = config
+        elif os.path.exists(SHELL_DEFAULT_CONF):
+            logger.debug('Using default config: %s' % SHELL_DEFAULT_CONF)
+            args.config = SHELL_DEFAULT_CONF
+        return func()
+
+    return _infer_config
+
 def _get_default_image():
     if DEFAULT_IMAGE_IS_MASTER:
         yellow = '\033[93m'
@@ -1649,6 +1679,9 @@ def get_container(fsid, daemon_type, daemon_id,
     elif daemon_type == CephIscsi.daemon_type:
         entrypoint = CephIscsi.entrypoint
         name = '%s.%s' % (daemon_type, daemon_id)
+        # So the container can modprobe iscsi_target_mod and have write perms
+        # to configfs we need to make this a privileged container.
+        privileged = True
     else:
         entrypoint = ''
         name = ''
@@ -1790,6 +1823,11 @@ def deploy_daemon_units(fsid, uid, gid, daemon_type, daemon_id, c,
         if daemon_type == 'osd':
             # osds have a pre-start step
             assert osd_fsid
+            f.write('# Simple OSDs need chown on startup:\n')
+            for n in ['block', 'block.db', 'block.wal']:
+                p = os.path.join(data_dir, n)
+                f.write('[ ! -L {p} ] || chown {uid}:{gid} {p}\n'.format(p=p, uid=uid, gid=gid))
+            f.write('# LVM OSDs use ceph-volume lvm activate:\n')
             prestart = CephContainer(
                 image=args.image,
                 entrypoint='/usr/sbin/ceph-volume',
@@ -2022,7 +2060,7 @@ KillMode=none
 Restart=on-failure
 RestartSec=10s
 TimeoutStartSec=120
-TimeoutStopSec=15
+TimeoutStopSec=120
 StartLimitInterval=30min
 StartLimitBurst=5
 
@@ -2090,6 +2128,7 @@ class CephContainer:
             'run',
             '--rm',
             '--net=host',
+            '--ipc=host',
         ] + self.container_args + priv + \
         cname + envs + \
         vols + entrypoint + \
@@ -2123,6 +2162,7 @@ class CephContainer:
             'run',
             '--rm',
             '--net=host',
+            '--ipc=host',
         ] + self.container_args + priv + envs + vols + [
             '--entrypoint', cmd[0],
             self.image
@@ -2716,6 +2756,7 @@ def command_run():
 ##################################
 
 @infer_fsid
+@infer_config
 @infer_image
 def command_shell():
     # type: () -> int
@@ -2737,8 +2778,6 @@ def command_shell():
     # use /etc/ceph files by default, if present.  we do this instead of
     # making these defaults in the arg parser because we don't want an error
     # if they don't exist.
-    if not args.config and os.path.exists(SHELL_DEFAULT_CONF):
-        args.config = SHELL_DEFAULT_CONF
     if not args.keyring and os.path.exists(SHELL_DEFAULT_KEYRING):
         args.keyring = SHELL_DEFAULT_KEYRING
 
@@ -2749,6 +2788,12 @@ def command_shell():
         mounts[pathify(args.config)] = '/etc/ceph/ceph.conf:z'
     if args.keyring:
         mounts[pathify(args.keyring)] = '/etc/ceph/ceph.keyring:z'
+    if args.mount:
+        mount = pathify(args.mount)
+        filename = ''
+        if os.path.isfile(mount):
+            _, filename = os.path.split(mount)
+        mounts[mount] = '/mnt/{}:z'.format(filename)
     if args.command:
         command = args.command
     else:
@@ -3130,13 +3175,13 @@ class AdoptOsd(object):
             with open(path, 'r') as f:
                 osd_fsid = f.read().strip()
             logger.info("Found online OSD at %s" % path)
-            if os.path.exists(os.path.join(self.osd_data_dir, 'type')):
-                with open(os.path.join(self.osd_data_dir, 'type')) as f:
-                    osd_type = f.read().strip()
-            else:
-                logger.info('"type" file missing for OSD data dir')
         except IOError:
             logger.info('Unable to read OSD fsid from %s' % path)
+        if os.path.exists(os.path.join(self.osd_data_dir, 'type')):
+            with open(os.path.join(self.osd_data_dir, 'type')) as f:
+                osd_type = f.read().strip()
+        else:
+            logger.info('"type" file missing for OSD data dir')
 
         return osd_fsid, osd_type
 
@@ -3218,6 +3263,7 @@ def command_adopt_ceph(daemon_type, daemon_id, fsid):
         if not osd_fsid:
             raise Error('Unable to find OSD {}'.format(daemon_id))
         logger.info('objectstore_type is %s' % osd_type)
+        assert osd_type
         if osd_type == 'filestore':
             raise Error('FileStore is not supported by cephadm')
 
@@ -4273,12 +4319,15 @@ def _get_parser():
         '--keyring', '-k',
         help='ceph.keyring to pass through to the container')
     parser_shell.add_argument(
+        '--mount', '-m',
+        help='file or directory path that will be mounted in container /mnt')
+    parser_shell.add_argument(
         '--env', '-e',
         action='append',
         default=[],
         help='set environment variable')
     parser_shell.add_argument(
-        'command', nargs='*',
+        'command', nargs=argparse.REMAINDER,
         help='command (optional)')
 
     parser_enter = subparsers.add_parser(
@@ -4292,7 +4341,7 @@ def _get_parser():
         required=True,
         help='daemon name (type.id)')
     parser_enter.add_argument(
-        'command', nargs='*',
+        'command', nargs=argparse.REMAINDER,
         help='command')
 
     parser_ceph_volume = subparsers.add_parser(
@@ -4311,7 +4360,7 @@ def _get_parser():
         '--keyring', '-k',
         help='ceph.keyring to pass through to the container')
     parser_ceph_volume.add_argument(
-        'command', nargs='+',
+        'command', nargs=argparse.REMAINDER,
         help='command')
 
     parser_unit = subparsers.add_parser(
@@ -4540,7 +4589,10 @@ def _get_parser():
 
 def _parse_args(av):
     parser = _get_parser()
-    return parser.parse_args(av)
+    args = parser.parse_args(av)
+    if 'command' in args and args.command and args.command[0] == "--":
+        args.command.pop(0)
+    return args
 
 if __name__ == "__main__":
     # allow argv to be injected

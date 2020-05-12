@@ -153,6 +153,8 @@ public:
 
   void dispatch() override;
 
+  virtual std::shared_ptr<WriteLogOperation> create_operation(uint64_t offset, uint64_t len);
+
   virtual void setup_log_operations(DeferredContexts &on_exit);
 
   bool append_write_request(std::shared_ptr<SyncPoint> sync_point);
@@ -165,6 +167,7 @@ public:
 
 protected:
   using C_BlockIORequest<T>::m_resources;
+  PerfCounters *m_perfcounter = nullptr;
   /* Plain writes will allocate one buffer per request extent */
   void setup_buffer_resources(
       uint64_t &bytes_cached, uint64_t &bytes_dirtied, uint64_t &bytes_allocated,
@@ -176,7 +179,6 @@ private:
   std::atomic<int> m_appended = {0};
   bool m_queued = false;
   ceph::mutex &m_lock;
-  PerfCounters *m_perfcounter = nullptr;
   template <typename U>
   friend std::ostream &operator<<(std::ostream &os,
                                   const C_WriteRequest<U> &req);
@@ -254,6 +256,122 @@ private:
   bufferlist *m_out_bl;
   utime_t m_arrived_time;
   PerfCounters *m_perfcounter;
+};
+
+/**
+ * This is the custodian of the BlockGuard cell for this discard. As in the
+ * case of write, the block guard is not released until the discard persists
+ * everywhere.
+ */
+template <typename T>
+class C_DiscardRequest : public C_BlockIORequest<T> {
+public:
+  using C_BlockIORequest<T>::rwl;
+  std::shared_ptr<DiscardLogOperation> op;
+
+  C_DiscardRequest(T &rwl, const utime_t arrived, io::Extents &&image_extents,
+                   uint32_t discard_granularity_bytes, ceph::mutex &lock,
+                   PerfCounters *perfcounter, Context *user_req);
+
+  ~C_DiscardRequest() override;
+  void finish_req(int r) override {}
+
+  bool alloc_resources() override;
+
+  void deferred_handler() override { }
+
+  void setup_log_operations();
+
+  void dispatch() override;
+
+  void blockguard_acquired(GuardedRequestFunctionContext &guard_ctx);
+
+  const char *get_name() const override {
+    return "C_DiscardRequest";
+  }
+  void setup_buffer_resources(
+      uint64_t &bytes_cached, uint64_t &bytes_dirtied, uint64_t &bytes_allocated,
+      uint64_t &number_lanes, uint64_t &number_log_entries,
+      uint64_t &number_unpublished_reserves) override;
+private:
+  uint32_t m_discard_granularity_bytes;
+  ceph::mutex &m_lock;
+  PerfCounters *m_perfcounter = nullptr;
+  template <typename U>
+  friend std::ostream &operator<<(std::ostream &os,
+                                  const C_DiscardRequest<U> &req);
+};
+
+/**
+ * This is the custodian of the BlockGuard cell for this write same.
+ *
+ * A writesame allocates and persists a data buffer like a write, but the
+ * data buffer is usually much shorter than the write same.
+ */
+template <typename T>
+class C_WriteSameRequest : public C_WriteRequest<T> {
+public:
+  using C_BlockIORequest<T>::rwl;
+  C_WriteSameRequest(T &rwl, const utime_t arrived, io::Extents &&image_extents,
+                     bufferlist&& bl, const int fadvise_flags, ceph::mutex &lock,
+                     PerfCounters *perfcounter, Context *user_req);
+
+  ~C_WriteSameRequest() override;
+
+  void update_req_stats(utime_t &now) override;
+
+  void setup_buffer_resources(
+      uint64_t &bytes_cached, uint64_t &bytes_dirtied, uint64_t &bytes_allocated,
+      uint64_t &number_lanes, uint64_t &number_log_entries,
+      uint64_t &number_unpublished_reserves) override;
+
+  std::shared_ptr<WriteLogOperation> create_operation(uint64_t offset, uint64_t len) override;
+
+  const char *get_name() const override {
+    return "C_WriteSameRequest";
+  }
+
+  template<typename U>
+  friend std::ostream &operator<<(std::ostream &os,
+                                  const C_WriteSameRequest<U> &req);
+};
+
+/**
+ * This is the custodian of the BlockGuard cell for this compare and write. The
+ * block guard is acquired before the read begins to guarantee atomicity of this
+ * operation.  If this results in a write, the block guard will be released
+ * when the write completes to all replicas.
+ */
+template <typename T>
+class C_CompAndWriteRequest : public C_WriteRequest<T> {
+public:
+  using C_BlockIORequest<T>::rwl;
+  bool compare_succeeded = false;
+  uint64_t *mismatch_offset;
+  bufferlist cmp_bl;
+  bufferlist read_bl;
+  C_CompAndWriteRequest(T &rwl, const utime_t arrived, io::Extents &&image_extents,
+                        bufferlist&& cmp_bl, bufferlist&& bl, uint64_t *mismatch_offset,
+                        int fadvise_flags, ceph::mutex &lock, PerfCounters *perfcounter,
+                        Context *user_req);
+  ~C_CompAndWriteRequest();
+
+  void finish_req(int r) override;
+
+  void update_req_stats(utime_t &now) override;
+
+  /*
+   * Compare and write doesn't implement alloc_resources(), deferred_handler(),
+   * or dispatch(). We use the implementation in C_WriteRequest(), and only if the
+   * compare phase succeeds and a write is actually performed.
+   */
+
+  const char *get_name() const override {
+    return "C_CompAndWriteRequest";
+  }
+  template <typename U>
+  friend std::ostream &operator<<(std::ostream &os,
+                                  const C_CompAndWriteRequest<U> &req);
 };
 
 struct BlockGuardReqState {

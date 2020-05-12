@@ -245,6 +245,7 @@ class PoolTest(DashboardTestCase):
             'compression_mode': 'aggressive',
             'compression_max_blob_size': '10000000',
             'compression_required_ratio': '0.8',
+            'application_metadata': ['rbd'],
             'configuration': {
                 'rbd_qos_bps_limit': 2048,
                 'rbd_qos_iops_limit': None,
@@ -414,4 +415,5 @@ class PoolTest(DashboardTestCase):
             'pg_autoscale_modes': JList(six.string_types),
             'erasure_code_profiles': JList(JObj({}, allow_unknown=True)),
             'used_rules': JObj({}, allow_unknown=True),
+            'used_profiles': JObj({}, allow_unknown=True),
         }))

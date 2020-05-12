@@ -1,12 +1,5 @@
-<cd-loading-panel *ngIf="editing && loading && !error"
-                  i18n>Loading user data...</cd-loading-panel>
-<cd-alert-panel type="error"
-                *ngIf="editing && error"
-                (backAction)="goToListView()"
-                i18n>The user data could not be loaded.</cd-alert-panel>
-
 <div class="cd-col-form"
-     *ngIf="!loading && !error">
+     *cdFormLoading="loading">
   <form #frm="ngForm"
         [formGroup]="userForm"
         novalidate>
@@ -82,7 +75,8 @@
             <select class="form-control custom-select"
                     formControlName="max_buckets_mode"
                     name="max_buckets_mode"
-                    id="max_buckets_mode">
+                    id="max_buckets_mode"
+                    (change)="onMaxBucketsModeChange($event.target.value)">
               <option i18n
                       value="-1">Disabled</option>
               <option i18n

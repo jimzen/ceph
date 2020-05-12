@@ -4180,7 +4180,7 @@ void RGWPutObj::execute()
   }
 
   // send request to notification manager
-  const auto ret = rgw::notify::publish(s, s->object, s->obj_size, mtime, etag, rgw::notify::ObjectCreatedPut, store);
+  const auto ret = rgw::notify::publish(s, obj.key, s->obj_size, mtime, etag, rgw::notify::ObjectCreatedPut, store);
   if (ret < 0) {
     ldpp_dout(this, 5) << "WARNING: publishing notification failed, with error: " << ret << dendl;
 	// TODO: we should have conf to make send a blocking coroutine and reply with error in case sending failed
@@ -7615,6 +7615,8 @@ int RGWHandler::do_read_permissions(RGWOp *op, bool only_bucket)
 		      << " ret=" << ret << dendl;
     if (ret == -ENODATA)
       ret = -EACCES;
+    if (s->auth.identity->is_anonymous() && ret == -EACCES)
+      ret = -EPERM;
   }
 
   return ret;

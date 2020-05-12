@@ -81,7 +81,7 @@ public:
         delete hook;
         hook = nullptr;
       } else {
-        r = admin_socket->register_command("bluestore bluefs stats",
+        r = admin_socket->register_command("bluefs stats",
                                            hook,
                                            "Dump internal statistics for bluefs."
                                            "");
@@ -532,7 +532,7 @@ int BlueFS::mkfs(uuid_d osd_uuid, const bluefs_layout_t& layout)
   // init log
   FileRef log_file = ceph::make_ref<File>();
   log_file->fnode.ino = 1;
-  log_file->vselector_hint = vselector->get_hint_by_device(BDEV_WAL);
+  log_file->vselector_hint = vselector->get_hint_for_log();
   int r = _allocate(
     vselector->select_prefer_bdev(log_file->vselector_hint),
     cct->_conf->bluefs_max_log_runway,
@@ -980,7 +980,7 @@ int BlueFS::_replay(bool noop, bool to_stdout)
   if (!noop) {
     log_file->fnode = super.log_fnode;
     log_file->vselector_hint =
-      vselector->get_hint_by_device(BDEV_WAL);
+      vselector->get_hint_for_log();
   } else {
     // do not use fnode from superblock in 'noop' mode - log_file's one should
     // be fine and up-to-date
@@ -1890,7 +1890,7 @@ void BlueFS::_drop_link(FileRef file)
   }
 }
 
-int BlueFS::_read_random(
+int64_t BlueFS::_read_random(
   FileReader *h,         ///< [in] read from here
   uint64_t off,          ///< [in] offset
   uint64_t len,          ///< [in] this many bytes
@@ -1898,7 +1898,7 @@ int BlueFS::_read_random(
 {
   auto* buf = &h->buf;
 
-  int ret = 0;
+  int64_t ret = 0;
   dout(10) << __func__ << " h " << h
            << " 0x" << std::hex << off << "~" << len << std::dec
 	   << " from " << h->file->fnode << dendl;
@@ -1924,6 +1924,8 @@ int BlueFS::_read_random(
       uint64_t x_off = 0;
       auto p = h->file->fnode.seek(off, &x_off);
       uint64_t l = std::min(p->length - x_off, len);
+      //hard cap to 1GB
+      l = std::min(l, uint64_t(1) << 30);
       dout(20) << __func__ << " read random 0x"
 	       << std::hex << x_off << "~" << l << std::dec
 	       << " of " << *p << dendl;
@@ -1942,7 +1944,7 @@ int BlueFS::_read_random(
       }
     } else {
       auto left = buf->get_buf_remaining(off);
-      int r = std::min(len, left);
+      int64_t r = std::min(len, left);
       logger->inc(l_bluefs_read_random_buffer_count, 1);
       logger->inc(l_bluefs_read_random_buffer_bytes, r);
       dout(20) << __func__ << " left 0x" << std::hex << left
@@ -1971,7 +1973,7 @@ int BlueFS::_read_random(
   return ret;
 }
 
-int BlueFS::_read(
+int64_t BlueFS::_read(
   FileReader *h,         ///< [in] read from here
   uint64_t off,          ///< [in] offset
   size_t len,            ///< [in] this many bytes
@@ -2008,7 +2010,7 @@ int BlueFS::_read(
   if (outbl)
     outbl->clear();
 
-  int ret = 0;
+  int64_t ret = 0;
   std::shared_lock s_lock(h->lock);
   while (len > 0) {
     size_t left;
@@ -2025,6 +2027,8 @@ int BlueFS::_read(
 				    super.block_size);
         want = std::max(want, buf->max_prefetch);
         uint64_t l = std::min(p->length - x_off, want);
+        //hard cap to 1GB
+	l = std::min(l, uint64_t(1) << 30);
         uint64_t eof_offset = round_up_to(h->file->fnode.size, super.block_size);
         if (!h->ignore_eof &&
 	    buf->bl_off + l > eof_offset) {
@@ -2046,7 +2050,7 @@ int BlueFS::_read(
     dout(20) << __func__ << " left 0x" << std::hex << left
              << " len 0x" << len << std::dec << dendl;
 
-    int r = std::min(len, left);
+    int64_t r = std::min(len, left);
     if (outbl) {
       bufferlist t;
       t.substr_of(buf->bl, off - buf->bl_off, r);
@@ -2070,7 +2074,6 @@ int BlueFS::_read(
     ret += r;
     buf->pos += r;
   }
-
   dout(20) << __func__ << " got " << ret << dendl;
   ceph_assert(!outbl || (int)outbl->length() == ret);
   --h->file->num_reading;
@@ -3239,6 +3242,7 @@ int BlueFS::open_for_write(
 
   FileRef file;
   bool create = false;
+  bool truncate = false;
   map<string,FileRef>::iterator q = dir->file_map.find(filename);
   if (q == dir->file_map.end()) {
     if (overwrite) {
@@ -3269,6 +3273,7 @@ int BlueFS::open_for_write(
       for (auto& p : file->fnode.extents) {
 	pending_release[p.bdev].insert(p.offset, p.length);
       }
+      truncate = true;
 
       file->fnode.clear_extents();
     }
@@ -3277,6 +3282,9 @@ int BlueFS::open_for_write(
 
   file->fnode.mtime = ceph_clock_now();
   file->vselector_hint = vselector->get_hint_by_dir(dirname);
+  if (create || truncate) {
+    vselector->add_usage(file->vselector_hint, file->fnode); // update file count
+  }
 
   dout(20) << __func__ << " mapping " << dirname << "/" << filename
 	   << " vsel_hint " << file->vselector_hint
@@ -3607,8 +3615,8 @@ void BlueFS::debug_inject_duplicate_gift(unsigned id,
 // ===============================================
 // OriginalVolumeSelector
 
-void* OriginalVolumeSelector::get_hint_by_device(uint8_t dev) const {
-  return reinterpret_cast<void*>(dev);
+void* OriginalVolumeSelector::get_hint_for_log() const {
+  return reinterpret_cast<void*>(BlueFS::BDEV_WAL);
 }
 void* OriginalVolumeSelector::get_hint_by_dir(const string& dirname) const {
   uint8_t res = BlueFS::BDEV_DB;
